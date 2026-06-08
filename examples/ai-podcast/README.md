@@ -19,6 +19,10 @@ production, provenance, and the continued role of human creative agency.
 - Per-turn audio clips: `output/audio/`
 - Per-turn lip-synced video clips: `output/video/`
 
+**Final video:** https://youtube.com/shorts/hKBNqnCMQNE
+
+
+
 ## Original Prompt
 
 ```text

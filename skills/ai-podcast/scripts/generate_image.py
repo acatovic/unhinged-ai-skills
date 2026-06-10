@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Generate a portrait speaker image for the AI podcast workflow."""
+"""Generate a portrait speaker image for the AI podcast workflow with Pruna."""
 
 from __future__ import annotations
 
 import argparse
-import base64
+import json
 import os
 import re
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
+from typing import Any
 
 
-DEFAULT_MODEL = "gpt-image-2"
-DEFAULT_QUALITY = "medium"
-DEFAULT_SIZE = "1024x1536"
+DEFAULT_API_BASE_URL = "https://api.pruna.ai/v1"
+DEFAULT_MODEL = "p-image"
+DEFAULT_WIDTH = 816
+DEFAULT_HEIGHT = 1440
 DEFAULT_OUTPUT_DIR = Path("output/images")
 DEFAULT_GUIDELINE_SECTIONS = ("Image Prompt Guidelines",)
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 
 
 def slugify(value: str) -> str:
@@ -23,29 +30,21 @@ def slugify(value: str) -> str:
     return slug or "speaker"
 
 
-def validate_portrait_size(value: str) -> str:
-    match = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", value)
-    if not match:
-        raise argparse.ArgumentTypeError("size must use WIDTHxHEIGHT, such as 1024x1536")
+def validate_dimension(value: str) -> int:
+    try:
+        dimension = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("dimension must be an integer") from error
 
-    width = int(match.group(1))
-    height = int(match.group(2))
-    pixels = width * height
-
-    if width >= height:
-        raise argparse.ArgumentTypeError("size must be portrait, with width less than height")
-    if width % 16 != 0 or height % 16 != 0:
-        raise argparse.ArgumentTypeError("gpt-image-2 size edges must be multiples of 16")
-    if max(width, height) >= 3840:
-        raise argparse.ArgumentTypeError("gpt-image-2 maximum edge length must be less than 3840")
-    if height / width > 3:
-        raise argparse.ArgumentTypeError("gpt-image-2 aspect ratio must not exceed 3:1")
-    if pixels < 655_360 or pixels > 8_294_400:
+    if dimension < 256 or dimension > 1440:
         raise argparse.ArgumentTypeError(
-            "gpt-image-2 total pixels must be between 655360 and 8294400"
+            "Pruna p-image custom dimensions must be between 256 and 1440"
         )
-
-    return value
+    if dimension % 16 != 0:
+        raise argparse.ArgumentTypeError(
+            "Pruna p-image custom dimensions must be multiples of 16"
+        )
+    return dimension
 
 
 def read_description(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
@@ -93,6 +92,16 @@ def load_env_file(path: Path) -> None:
                 continue
             key, value = parsed
             os.environ.setdefault(key, value)
+
+
+def load_api_key(env_path: Path) -> str:
+    load_env_file(env_path)
+    api_key = os.environ.get("PRUNA_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "PRUNA_API_KEY is not set. Add it to .env or the environment."
+        )
+    return api_key
 
 
 def normalize_heading(value: str) -> str:
@@ -170,27 +179,196 @@ Output requirements:
 
 def default_output_path(args: argparse.Namespace) -> Path:
     stem = slugify(args.speaker or "podcast-character")
-    return args.output_dir / f"{stem}.png"
+    return args.output_dir / f"{stem}.jpg"
 
 
-def save_image_result(result: object, output_path: Path) -> None:
-    data = getattr(result, "data", None)
-    if not data:
-        raise RuntimeError("OpenAI image response did not include image data")
+def build_api_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
-    first_image = data[0]
-    image_base64 = getattr(first_image, "b64_json", None)
-    if not image_base64:
-        raise RuntimeError("OpenAI image response did not include b64_json data")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(base64.b64decode(image_base64))
+def absolute_url(value: str, base_url: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme in {"http", "https"}:
+        return value
+
+    parsed_base = urllib.parse.urlparse(base_url)
+    if value.startswith("/"):
+        origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+        return urllib.parse.urljoin(origin, value)
+    return urllib.parse.urljoin(f"{base_url.rstrip('/')}/", value)
+
+
+def request_json(
+    url: str,
+    *,
+    api_key: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    request_headers = {"apikey": api_key}
+    if headers:
+        request_headers.update(headers)
+
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=request_headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {error.code} for {url}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Request failed for {url}: {error.reason}") from error
+
+    if not payload:
+        return {}
+
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        text = payload.decode("utf-8", errors="replace")
+        raise RuntimeError(f"Expected JSON from {url}, got: {text[:500]}") from error
+
+
+def create_prediction(
+    prompt: str, *, api_key: str, args: argparse.Namespace
+) -> dict[str, Any]:
+    payload = json.dumps(
+        {
+            "input": {
+                "prompt": prompt,
+                "aspect_ratio": "custom",
+                "width": args.width,
+                "height": args.height,
+            }
+        }
+    ).encode("utf-8")
+    url = build_api_url(args.api_base_url, "/predictions")
+    return request_json(
+        url,
+        api_key=api_key,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Model": args.model,
+        },
+        body=payload,
+        timeout=args.request_timeout,
+    )
+
+
+def iter_strings(value: Any) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        for item in value.values():
+            strings.extend(iter_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            strings.extend(iter_strings(item))
+    return strings
+
+
+def normalize_image_url(value: str, api_base_url: str) -> str | None:
+    url = absolute_url(value, api_base_url)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+
+    path = parsed.path.lower()
+    if path.endswith(IMAGE_SUFFIXES):
+        return url
+    if "/delivery/" in path:
+        normalized_path = f"{parsed.path.rstrip('/')}/output.jpg"
+        return urllib.parse.urlunparse(parsed._replace(path=normalized_path))
+    return None
+
+
+def find_image_url(status_response: dict[str, Any], api_base_url: str) -> str | None:
+    preferred_keys = ("output", "generation_url", "image", "url")
+    for key in preferred_keys:
+        if key not in status_response:
+            continue
+        for value in iter_strings(status_response[key]):
+            image_url = normalize_image_url(value, api_base_url)
+            if image_url is not None:
+                return image_url
+
+    for value in iter_strings(status_response):
+        image_url = normalize_image_url(value, api_base_url)
+        if image_url is not None:
+            return image_url
+    return None
+
+
+def poll_prediction(
+    get_url: str, *, api_key: str, args: argparse.Namespace
+) -> dict[str, Any]:
+    deadline = time.monotonic() + args.poll_timeout
+    last_status = "unknown"
+
+    while True:
+        response = request_json(
+            absolute_url(get_url, args.api_base_url),
+            api_key=api_key,
+            timeout=args.request_timeout,
+        )
+        status = str(response.get("status", "unknown")).lower()
+        last_status = status
+        print(f"Prediction status: {status}")
+
+        if status == "succeeded":
+            if find_image_url(response, args.api_base_url) is None:
+                raise RuntimeError(
+                    "Prediction succeeded but no image URL was found in response: "
+                    f"{response}"
+                )
+            return response
+
+        if status in {"failed", "canceled", "cancelled", "error"}:
+            raise RuntimeError(f"Prediction ended with status {status}: {response}")
+
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out after {args.poll_timeout}s waiting for prediction. "
+                f"Last status: {last_status}"
+            )
+
+        time.sleep(args.poll_interval)
+
+
+def download_file(
+    url: str, output_path: Path, *, api_key: str, args: argparse.Namespace
+) -> None:
+    print(f"Downloading: {output_path}")
+    request = urllib.request.Request(url, headers={"apikey": api_key}, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=args.download_timeout) as response:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {error.code} while downloading {url}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Download failed for {url}: {error.reason}") from error
 
 
 def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a portrait podcast character image with OpenAI gpt-image-2. "
+            "Generate a portrait podcast character image with Pruna p-image. "
             "The prompt includes image guidelines extracted from SKILL.md."
         )
     )
@@ -208,7 +386,7 @@ def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
     parser.add_argument(
         "--output",
         type=Path,
-        help="Output PNG path. Defaults to output/images/<speaker>.png.",
+        help="Output image path. Defaults to output/images/<speaker>.jpg.",
     )
     parser.add_argument(
         "--output-dir",
@@ -234,24 +412,61 @@ def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
         "--env-file",
         type=Path,
         default=Path(".env"),
-        help="Optional .env file containing OPENAI_API_KEY.",
-    )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI image model.")
-    parser.add_argument(
-        "--quality",
-        choices=("low", "medium", "high"),
-        default=DEFAULT_QUALITY,
-        help="OpenAI image generation quality.",
+        help="Optional .env file containing PRUNA_API_KEY.",
     )
     parser.add_argument(
-        "--size",
-        type=validate_portrait_size,
-        default=DEFAULT_SIZE,
-        help="Portrait output size. Default: 1024x1536.",
+        "--api-base-url",
+        default=DEFAULT_API_BASE_URL,
+        help=f"Pruna API base URL. Default: {DEFAULT_API_BASE_URL}",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Pruna model header value. Default: {DEFAULT_MODEL}",
+    )
+    parser.add_argument(
+        "--width",
+        type=validate_dimension,
+        default=DEFAULT_WIDTH,
+        help=f"Custom image width in pixels. Default: {DEFAULT_WIDTH}",
+    )
+    parser.add_argument(
+        "--height",
+        type=validate_dimension,
+        default=DEFAULT_HEIGHT,
+        help=f"Custom image height in pixels. Default: {DEFAULT_HEIGHT}",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between prediction status polls. Default: 5",
+    )
+    parser.add_argument(
+        "--poll-timeout",
+        type=int,
+        default=600,
+        help="Maximum seconds to wait for the image prediction. Default: 600",
+    )
+    parser.add_argument(
+        "--request-timeout",
+        type=int,
+        default=120,
+        help="Timeout in seconds for API requests. Default: 120",
+    )
+    parser.add_argument(
+        "--download-timeout",
+        type=int,
+        default=600,
+        help="Timeout in seconds for image downloads. Default: 600",
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output file.")
     parser.add_argument("--dry-run", action="store_true", help="Print the prompt without generating.")
-    return parser.parse_args(), parser
+
+    args = parser.parse_args()
+    if args.width >= args.height:
+        parser.error("width must be less than height for portrait speaker images")
+    return args, parser
 
 
 def main() -> int:
@@ -267,48 +482,41 @@ def main() -> int:
 
     try:
         guidelines = load_guidelines(args.skill_file, section_names)
-    except OSError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        prompt = build_prompt(description, guidelines, args.speaker)
+
+        if args.dry_run:
+            print(f"Model: {args.model}")
+            print("Aspect ratio: custom")
+            print(f"Width: {args.width}")
+            print(f"Height: {args.height}")
+            print(f"Output: {output_path}")
+            print()
+            print(prompt)
+            return 0
+
+        api_key = load_api_key(args.env_file)
+        print(f"Generating image with {args.model} at {args.width}x{args.height}")
+        response = create_prediction(prompt, api_key=api_key, args=args)
+        image_url = find_image_url(response, args.api_base_url)
+
+        if image_url is None:
+            get_url = response.get("get_url")
+            if not isinstance(get_url, str) or not get_url:
+                raise RuntimeError(
+                    f"Prediction response did not include get_url: {response}"
+                )
+            status_response = poll_prediction(get_url, api_key=api_key, args=args)
+            image_url = find_image_url(status_response, args.api_base_url)
+
+        if image_url is None:
+            raise RuntimeError(f"Could not locate image URL: {response}")
+
+        download_file(image_url, output_path, api_key=api_key, args=args)
+        print(f"Created: {output_path}")
+    except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+        print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    prompt = build_prompt(description, guidelines, args.speaker)
-
-    if args.dry_run:
-        print(f"Model: {args.model}")
-        print(f"Size: {args.size}")
-        print(f"Quality: {args.quality}")
-        print(f"Output: {output_path}")
-        print()
-        print(prompt)
-        return 0
-
-    load_env_file(args.env_file)
-    if not os.environ.get("OPENAI_API_KEY"):
-        print(
-            "Error: OPENAI_API_KEY is not set. Add it to .env or the environment.",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print(
-            "Error: the openai Python package is not installed. "
-            "Install it with: python3 -m pip install openai",
-            file=sys.stderr,
-        )
-        return 1
-
-    client = OpenAI()
-    result = client.images.generate(
-        model=args.model,
-        prompt=prompt,
-        size=args.size,
-        quality=args.quality,
-    )
-    save_image_result(result, output_path)
-    print(f"Created: {output_path}")
     return 0
 
 

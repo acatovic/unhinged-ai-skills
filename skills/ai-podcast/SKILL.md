@@ -13,7 +13,7 @@ identity, tone, or source material is ambiguous.
 Use the bundled scripts for the deterministic parts of the pipeline:
 
 - `scripts/generate_image.py` reads image guidelines from `SKILL.md` and
-  generates portrait speaker reference images with OpenAI `gpt-image-2`.
+  generates portrait speaker reference images with Pruna `p-image`.
 - `scripts/generate_audio.py` parses `script.txt`, optionally exports cloned voices,
   and generates per-turn WAV files.
 - `scripts/resize.sh` resizes two speaker images to 810x1440 and appends
@@ -45,8 +45,8 @@ Expected output layout:
 
 ```text
 output/
-output/images/host.png
-output/images/guest.png
+output/images/host.jpg
+output/images/guest.jpg
 output/safetensors/host.safetensors
 output/safetensors/guest.safetensors
 output/audio/001-host.wav
@@ -65,11 +65,10 @@ Required host tools:
 - `ffmpeg` for final stitching
 - ImageMagick `magick` for image resizing
 
-Pruna (and optionally OpenAI for image generation) credentials must be in `.env` in the project root:
+Pruna credentials must be in `.env` in the project root:
 
 ```text
 PRUNA_API_KEY=pru...
-OPENAI_API_KEY=xxxxx  # NOTE: only needed for image generation if reference images are not already provided
 ```
 
 ## Workflow
@@ -110,8 +109,10 @@ as `script.txt`.
 Use `scripts/generate_image.py` when one or more speaker reference images are
 missing and the user has provided enough description to create them. The script
 extracts `Image Prompt Guidelines` from `SKILL.md`, combines those guidelines
-with the user description, and calls OpenAI `gpt-image-2` to generate a portrait
-image. Default output is `1024x1536` PNG in `output/images/`.
+with the user description, and calls Pruna `p-image` to generate a portrait
+image. It uses `aspect_ratio: "custom"` with explicit width and height. Default
+output is `816x1440` JPG in `output/images/`, then `scripts/resize.sh` can
+produce the exact 810x1440 video reference image.
 
 ### Image Prompt Guidelines
 
@@ -148,9 +149,10 @@ Generate one image per speaker:
 
 Useful options:
 
-- `--output PATH` writes to an explicit PNG path.
+- `--output PATH` writes to an explicit image path.
 - `--description-file PATH` reads a longer character description from a file.
-- `--quality low|medium|high` changes OpenAI image quality.
+- `--width PIXELS` and `--height PIXELS` set Pruna custom dimensions. Each must
+  be 256-1440 pixels and a multiple of 16. Defaults are 816x1440.
 - `--overwrite` replaces an existing output file.
 
 ## Reference Images
@@ -162,8 +164,11 @@ missing speaker image would require inventing important identity, visual style,
 or likeness details, ask the user for clarification before generating. Otherwise
 choose simple podcast-portrait defaults and proceed.
 
-The video target is 9:16, and the recommended image size is 810x1440. Check image
-dimensions with:
+The video target is 9:16, and the recommended video reference image size is
+810x1440. Pruna `p-image` custom dimensions must be multiples of 16, so
+`scripts/generate_image.py` defaults to 816x1440 and generated images should be
+resized before video generation when exact 810x1440 inputs are needed. Check
+image dimensions with:
 
 ```bash
 magick identify <IMAGE>
@@ -172,11 +177,11 @@ magick identify <IMAGE>
 Resize two speaker images with:
 
 ```bash
-./scripts/resize.sh ./project/host.png ./project/guest.png
+./scripts/resize.sh ./output/images/host.jpg ./output/images/guest.jpg
 ```
 
-The resized files are written next to the originals as `host-810x1440.png` and
-`guest-810x1440.png`. Use the resized images for video generation.
+The resized files are written next to the originals as `host-810x1440.jpg` and
+`guest-810x1440.jpg`. Use the resized images for video generation.
 
 ## Audio Generation
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="https://github.com/acatovic/unhinged-skills.git"
+REPO_URL="https://github.com/acatovic/unhinged-ai-skills.git"
 SKILL_NAME="${1:-}"
 TARGET_MODE="${2:---both}"
 INSTALL_SCOPE="${3:---project}"
@@ -14,9 +14,9 @@ fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-git clone --depth 1 "$REPO_URL" "$TMP_DIR/unhinged-skills" >/dev/null
+git clone --depth 1 "$REPO_URL" "$TMP_DIR/unhinged-ai-skills" >/dev/null
 
-SOURCE="$TMP_DIR/unhinged-skills/skills/$SKILL_NAME"
+SOURCE="$TMP_DIR/unhinged-ai-skills/skills/$SKILL_NAME"
 
 if [ ! -f "$SOURCE/SKILL.md" ]; then
   echo "Skill not found: $SKILL_NAME"

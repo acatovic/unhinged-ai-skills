@@ -14,7 +14,7 @@ Use `SKILL.md` as the primary workflow guide. In short:
 5. Stitch the clips with `scripts/stitch.sh`.
 
 Required credentials belong in `.env`: `PRUNA_API_KEY` for video generation and
-`OPENAI_API_KEY` when generating missing speaker images.
+Pruna `p-image` image generation.
 
 ## Example
 

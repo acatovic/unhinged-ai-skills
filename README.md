@@ -1,4 +1,4 @@
-# unhinged-skills
+# unhinged-ai-skills
 
 Reusable agent skills for Claude Code and Codex.
 
@@ -6,4 +6,4 @@ Reusable agent skills for Claude Code and Codex.
 
 ```bash
 cd your-project
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/unhinged-skills/main/installers/install.sh | bash -s -- ai-podcast --both
+curl -fsSL https://raw.githubusercontent.com/acatovic/unhinged-ai-skills/main/installers/install.sh | bash -s -- ai-podcast --both

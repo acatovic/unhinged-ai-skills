@@ -16,6 +16,8 @@ Use `SKILL.md` as the primary workflow guide. In short:
 Required credentials belong in `.env`: `PRUNA_API_KEY` for video generation and
 Pruna `p-image` image generation.
 
+To obtain Pruna API key please visit https://www.pruna.ai/.
+
 ## Example
 
 In Codex you can just copy-paste this:
